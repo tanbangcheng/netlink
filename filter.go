@@ -1,8 +1,11 @@
 package netlink
 
 import (
+	"bytes"
 	"fmt"
+	"github.com/vishvananda/netlink/nl"
 	"net"
+	"unsafe"
 )
 
 type Filter interface {
@@ -256,6 +259,125 @@ func NewSkbEditAction() *SkbEditAction {
 	return &SkbEditAction{
 		ActionAttrs: ActionAttrs{
 			Action: TC_ACT_PIPE,
+		},
+	}
+}
+
+type PeditAction struct {
+	sel    nl.TcPeditSel
+	keys   []nl.TcPeditKey
+	keysEx []nl.TcPeditKeyEx
+}
+
+func (p *PeditAction) Attrs() *ActionAttrs {
+	attr := &ActionAttrs{}
+	toAttrs(&p.sel.TcGen, attr)
+	return attr
+}
+
+func (p *PeditAction) Type() string {
+	return "pedit"
+}
+
+func (p *PeditAction) encode(parent *nl.RtAttr) {
+	parent.AddRtAttr(nl.TCA_ACT_KIND, nl.ZeroTerminated("pedit"))
+	actOpts := parent.AddRtAttr(nl.TCA_ACT_OPTIONS, nil)
+
+	bbuf := bytes.NewBuffer(make([]byte, 0, int(unsafe.Sizeof(p.sel)+unsafe.Sizeof(p.keys))))
+
+	bbuf.Write((*(*[nl.SizeOfPeditSel]byte)(unsafe.Pointer(&p.sel)))[:])
+
+	for i := uint8(0); i < p.sel.NKeys; i++ {
+		bbuf.Write((*(*[nl.SizeOfPeditKey]byte)(unsafe.Pointer(&p.keys[i])))[:])
+	}
+	actOpts.AddRtAttr(nl.TCA_PEDIT_PARMS_EX, bbuf.Bytes())
+
+	exAttrs := actOpts.AddRtAttr(nl.TCA_PEDIT_KEYS_EX|int(nl.NLA_F_NESTED), nil)
+	for i := uint8(0); i < p.sel.NKeys; i++ {
+		keyAttr := exAttrs.AddRtAttr(nl.TCA_PEDIT_KEY_EX|int(nl.NLA_F_NESTED), nil)
+
+		htypeBuf := make([]byte, 2)
+		cmdBuf := make([]byte, 2)
+
+		nl.NativeEndian().PutUint16(htypeBuf, uint16(p.keysEx[i].HeaderType))
+		nl.NativeEndian().PutUint16(cmdBuf, uint16(p.keysEx[i].Cmd))
+
+		keyAttr.AddRtAttr(nl.TCA_PEDIT_KEY_EX_HTYPE, htypeBuf)
+		keyAttr.AddRtAttr(nl.TCA_PEDIT_KEY_EX_CMD, cmdBuf)
+	}
+}
+
+func (p *PeditAction) SetEthDst(mac net.HardwareAddr) {
+	u32 := nl.NativeEndian().Uint32(mac)
+	u16 := nl.NativeEndian().Uint16(mac[4:])
+
+	tKey := nl.TcPeditKey{}
+	tKeyEx := nl.TcPeditKeyEx{}
+
+	tKey.Val = u32
+
+	tKeyEx.HeaderType = nl.TCA_PEDIT_KEY_EX_HDR_TYPE_ETH
+	tKeyEx.Cmd = nl.TCA_PEDIT_KEY_EX_CMD_SET
+
+	p.keys = append(p.keys, tKey)
+	p.keysEx = append(p.keysEx, tKeyEx)
+	p.sel.NKeys++
+
+	tKey = nl.TcPeditKey{}
+	tKeyEx = nl.TcPeditKeyEx{}
+
+	tKey.Val = uint32(u16)
+	tKey.Mask = 0xffff0000
+	tKey.Off = 4
+	tKeyEx.HeaderType = nl.TCA_PEDIT_KEY_EX_HDR_TYPE_ETH
+	tKeyEx.Cmd = nl.TCA_PEDIT_KEY_EX_CMD_SET
+
+	p.keys = append(p.keys, tKey)
+	p.keysEx = append(p.keysEx, tKeyEx)
+
+	p.sel.NKeys++
+}
+
+func (p *PeditAction) SetEthSrc(mac net.HardwareAddr) {
+	u16 := nl.NativeEndian().Uint16(mac)
+	u32 := nl.NativeEndian().Uint32(mac[2:])
+
+	tKey := nl.TcPeditKey{}
+	tKeyEx := nl.TcPeditKeyEx{}
+
+	tKey.Val = uint32(u16) << 16
+	tKey.Mask = 0x0000ffff
+	tKey.Off = 4
+
+	tKeyEx.HeaderType = nl.TCA_PEDIT_KEY_EX_HDR_TYPE_ETH
+	tKeyEx.Cmd = nl.TCA_PEDIT_KEY_EX_CMD_SET
+
+	p.keys = append(p.keys, tKey)
+	p.keysEx = append(p.keysEx, tKeyEx)
+	p.sel.NKeys++
+
+	tKey = nl.TcPeditKey{}
+	tKeyEx = nl.TcPeditKeyEx{}
+
+	tKey.Val = u32
+	tKey.Mask = 0
+	tKey.Off = 8
+
+	tKeyEx.HeaderType = nl.TCA_PEDIT_KEY_EX_HDR_TYPE_ETH
+	tKeyEx.Cmd = nl.TCA_PEDIT_KEY_EX_CMD_SET
+
+	p.keys = append(p.keys, tKey)
+	p.keysEx = append(p.keysEx, tKeyEx)
+
+	p.sel.NKeys++
+}
+
+func NewPeditAction(action TcAct) *PeditAction {
+	return &PeditAction{
+		sel: nl.TcPeditSel{
+			TcGen: nl.TcGen{
+				Action: int32(action),
+			},
 		},
 	}
 }
